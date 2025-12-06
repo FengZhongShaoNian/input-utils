@@ -61,6 +61,11 @@ rule_type = "DoubleClick"
 action = { Shortcut = "KEY_LEFTALT+KEY_F10" } # 切换窗口的最大化/还原状态
 
 [[rules]]
+key = "BTN_RIGHT"
+rule_type = "DoubleClick"
+action = { Shortcut = "KEY_LEFTMETA+C" } # 双击鼠标右键时出发自定义的快捷键：Meta+C，用于关闭窗口
+
+[[rules]]
 key = "BTN_SIDE"
 rule_type = "ScrollWheelWithKeyPressed"
 # 模拟Alt+Esc键（在Gnome中用了切换窗口，从首次模拟Alt+Esc开始，Alt键会一直按着，直到松开鼠标的BTN_SIDE键。按下BTN_SIDE键时，每转动一次鼠标滚轮就模拟一次Alt+Esc）
