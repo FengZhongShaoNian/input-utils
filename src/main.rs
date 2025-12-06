@@ -370,6 +370,11 @@ impl StateMachine {
             false
         }
     }
+
+    fn update_state(&mut self, new_state: State) {
+        println!("Updating state from {:?} to {:?}", self.state, new_state);
+        self.state = new_state;
+    }
     
     fn accept(&mut self, event: InputEvent) {
         let rules = &self.config.rules;
@@ -380,13 +385,14 @@ impl StateMachine {
         match event.destructure() {
             EventSummary::Key(key_event, key_code, value) => {
                 let key_action: KeyAction = value.into();
-                // println!("当前状态：{:?}, Key: {:?}, _value: {}, action: {:?}", self.state, key_event, _value, key_action);
+                println!("当前状态：{:?}, Key: {:?}, _value: {}, action: {:?}", self.state, key_event, value, key_action);
 
                 match self.state {
                     State::Init => {
                         if key_action == KeyAction::Pressed && self.interest_keys.contains(&key_code) {
-                            self.state = State::KeyDownFirstTime(key_event);
+                            self.update_state(State::KeyDownFirstTime(key_event));
                         }else {
+                            println!("透传{:?}事件", key_event);
                             self.send_key_event(key_action, key_code);
                         }
                     }
@@ -402,7 +408,7 @@ impl StateMachine {
                             if self.is_holding_key() {
                                 // 进入这里说明 ScrollWheelWithKeyPressed 事件已经发生
                                 self.release_holding_key();
-                                self.state = State::Init;
+                                self.update_state(State::Init);
                                 return;
                             }
                             // 处于 KeyDownFirstTime 状态，进入这里说明 ScrollWheelWithKeyPressed 事件没有发生，
@@ -411,10 +417,10 @@ impl StateMachine {
                             // 如果都不感兴趣，而当前又能走到 KeyDownFirstTime 状态，说明只对当前键的 ScrollWheelWithKeyPressed 事件感兴趣，那么流转回Init状态
                             if self.judge_interest(previous_key_down_event.code(), RuleType::Click) ||
                                 self.judge_interest(previous_key_down_event.code(), RuleType::DoubleClick) {
-                                self.state = State::KeyUpFirstTime(key_event);
+                                self.update_state(State::KeyUpFirstTime(key_event));
                             }else {
                                 // 只对当前键的 ScrollWheelWithKeyPressed 事件感兴趣
-                                self.state = State::Init;
+                                self.update_state(State::Init);
                             }
                         }
                     }
@@ -431,7 +437,7 @@ impl StateMachine {
                                     self.perform_shortcut_action(&action);
                                 }
                             }
-                            self.state = State::Init;
+                            self.update_state(State::Init);
                             self.accept(event);
                         }else if key_action == KeyAction::Pressed && previous_key_up_event.code() == key_code {
                             if self.judge_interest(previous_key_up_event.code(), RuleType::DoubleClick) {
@@ -440,14 +446,14 @@ impl StateMachine {
                                 if let Some(action) = self.get_action_for(&key_code, &RuleType::DoubleClick) {
                                     self.perform_shortcut_action(&action);
                                 }
-                                self.state = State::Init;
+                                self.update_state(State::Init);
                             }else {
                                 // 对当前键的【双击】事件不感兴趣，那么意味着需要透传当前键的双击事件，然后流转回Init状态
                                 self.send_key_event(KeyAction::Pressed, key_code);
                                 self.send_key_event(KeyAction::Released, key_code);
                                 self.send_key_event(KeyAction::Pressed, key_code);
                                 self.send_key_event(KeyAction::Released, key_code);
-                                self.state = State::Init;
+                                self.update_state(State::Init);
                             }
                         }
                     }
@@ -499,10 +505,12 @@ impl StateMachine {
                     if let Some(action) = self.get_action_for(&previous_key_up_event.code(), &RuleType::Click) {
                         self.perform_shortcut_action(&action);
                     }
-                    self.state = State::Init;
+                    self.update_state(State::Init);
                 }else {
-                    // 只对双击感兴趣，但是超时了，流转回Init状态
-                    self.state = State::Init;
+                    // 只对双击感兴趣，但是超时了，透传并流转回Init状态
+                    self.send_key_event(KeyAction::Pressed, previous_key_up_event.code());
+                    self.send_key_event(KeyAction::Released, previous_key_up_event.code());
+                    self.update_state(State::Init);
                 }
             }
         }
