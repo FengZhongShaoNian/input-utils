@@ -14,6 +14,7 @@ mouse = "/dev/input/by-path/pci-0000:04:00.4-usb-0:2:1.0-event-mouse"
 # 键盘左侧的Meta键（也就是Windows键）: KEY_RIGHTMETA
 # 鼠标侧键之前边侧键: BTN_EXTRA
 # 鼠标侧键之后边侧键: BTN_SIDE
+# 鼠标右键：BTN_RIGHT
 #
 # （2）rule_type字段支持如下的值：
 # 单击：Click

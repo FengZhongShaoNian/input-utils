@@ -1,5 +1,5 @@
 use evdev::{Device, EventSummary, InputEvent, KeyCode, KeyEvent, RelativeAxisCode, RelativeAxisEvent};
-use mouse_keyboard_input::{input_event, VirtualDevice};
+use mouse_keyboard_input::VirtualDevice;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::future;
@@ -38,7 +38,8 @@ enum Key {
     LeftMeta, // 左侧的Win键
     RightMeta,// 右侧的Win键
     BtnSide, // 鼠标的两个侧键中靠后的那个键
-    BtnExtra // 鼠标的两个侧键中靠前的那个键
+    BtnExtra, // 鼠标的两个侧键中靠前的那个键
+    BtnRight // 鼠标右键
 }
 
 impl Into<KeyCode> for Key{
@@ -54,6 +55,7 @@ impl Into<KeyCode> for Key{
             Key::RightMeta => KeyCode::KEY_RIGHTMETA,
             Key::BtnSide => KeyCode::BTN_SIDE,
             Key::BtnExtra => KeyCode::BTN_EXTRA,
+            Key::BtnRight => KeyCode::BTN_RIGHT
         }
     }
 }
@@ -71,6 +73,7 @@ impl From<KeyCode> for Key {
             KeyCode::KEY_RIGHTMETA => Key::RightMeta,
             KeyCode::BTN_SIDE => Key::BtnSide,
             KeyCode::BTN_EXTRA => Key::BtnExtra,
+            KeyCode::BTN_RIGHT => Key::BtnRight,
             _ => panic!("Unsupported key {:?} for input", value)
         }
     }
@@ -377,7 +380,7 @@ impl StateMachine {
         match event.destructure() {
             EventSummary::Key(key_event, key_code, value) => {
                 let key_action: KeyAction = value.into();
-                // println!("当前状态：{:?}, Key: {:?}, value: {}, action: {:?}", self.state, key_event, value, key_action);
+                // println!("当前状态：{:?}, Key: {:?}, _value: {}, action: {:?}", self.state, key_event, _value, key_action);
 
                 match self.state {
                     State::Init => {
@@ -450,7 +453,7 @@ impl StateMachine {
                     }
                 }
             }
-            EventSummary::RelativeAxis(axis_event, axis_code, value) => {
+            EventSummary::RelativeAxis(axis_event, axis_code, _value) => {
                 if axis_code == RelativeAxisCode::REL_X || axis_code == RelativeAxisCode::REL_Y {
                     // 鼠标移动事件，直接透传
                     self.send_mouse_event(axis_event);
@@ -535,7 +538,7 @@ async fn main() {
             mouse_event = next_mouse_event_future => {
                 state_machine.accept(mouse_event.expect("Failed to accept mouse event"));
             }
-        };
+        }
     }
 }
 
