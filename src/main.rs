@@ -183,6 +183,7 @@ enum State {
     /// 1. 处于 KeyDownFirstTime 状态，忽略鼠标移动事件（直接透传鼠标移动事件），下一个事件是滚轮事件，那么【键持续按下并滚动鼠标滚轮】行为发生了，不流转状态。
     /// 2. 处于 KeyDownFirstTime 状态，如果下一个事件是其它键的按下事件，那么透传，同时状态流转回Init状态。
     /// 3. 处于 KeyDownFirstTime 状态，如果下一个事件是当前键松开的事件，那么转为KeyUpFirstTime状态。
+    /// 4. 处于 KeyDownFirstTime 状态，对应的键是鼠标右键，如果超时，那么透传并流转回Init状态。
     KeyDownFirstTime(KeyEvent),
 
     /// 只有对某个键的【单击】、【双击】这2个事件的任一事件感兴趣，才会流转到这个状态。
@@ -203,14 +204,14 @@ impl State {
             State::KeyDownFirstTime(ev) => {
                 // 如果按下的键是鼠标右键，那么设置超时事件，避免无法使用鼠标手势
                 if ev.code() == Key::BtnRight.into() {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }else {
                     let future = future::pending();
                     let () = future.await;
                 }
             }
             State::KeyUpFirstTime(_) => {
-                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
             }
         }
     }
