@@ -200,9 +200,14 @@ impl State {
                 let future = future::pending();
                 let () = future.await;
             }
-            State::KeyDownFirstTime(_) => {
-                let future = future::pending();
-                let () = future.await;
+            State::KeyDownFirstTime(ev) => {
+                // 如果按下的键是鼠标右键，那么设置超时事件，避免无法使用鼠标手势
+                if ev.code() == Key::BtnRight.into() {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                }else {
+                    let future = future::pending();
+                    let () = future.await;
+                }
             }
             State::KeyUpFirstTime(_) => {
                 tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -502,8 +507,9 @@ impl StateMachine {
             State::Init => {
                 panic!("State::Init状态不应该存在超时事件");
             }
-            State::KeyDownFirstTime(_) => {
-                panic!("State::KeyDownFirstTime状态不应该存在超时事件");
+            State::KeyDownFirstTime(previous_key_down_event) => {
+                self.send_key_event(KeyAction::Pressed, previous_key_down_event.code());
+                self.update_state(State::Init);
             }
             State::KeyUpFirstTime(previous_key_up_event) => {
                 // 当前状态是 KeyUpFirstTime 状态，意味着至少对【单击】、【双击】二者之一感兴趣
