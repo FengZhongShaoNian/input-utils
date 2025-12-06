@@ -1,9 +1,10 @@
-use evdev::{Device, EventSummary, InputEvent, KeyCode, KeyEvent, RelativeAxisCode, RelativeAxisEvent};
+use evdev::{Device, EventStream, EventSummary, InputEvent, KeyCode, KeyEvent, RelativeAxisCode, RelativeAxisEvent};
 use mouse_keyboard_input::VirtualDevice;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
-use std::future;
-use strum::{EnumIter, IntoEnumIterator};
+use std::sync::{Arc, Mutex};
+use std::{future, io};
+use strum::{EnumIter};
 use tokio::select;
 
 #[derive(Debug, Deserialize)]
@@ -187,8 +188,8 @@ enum State {
     /// 只有对某个键的【单击】、【双击】这2个事件的任一事件感兴趣，才会流转到这个状态。
     /// 某个键被首次松开。可能发生的行为有：单击、双击
     /// 1.处于 KeyUpFirstTime 状态，若对当前键的单击事件不感兴趣，那么判断是否需要关注它的双击事件，若只需要关注双击事件，那么不流转状态，若都不需要关注，那么透传并流转回Init状态
-    /// 2.处于 KeyUpFirstTime 状态，250毫秒内相同的键没有被再次按下（250毫秒内没有任何键按下、下一个事件上其它键的按下事件），那么【单击】行为发生了，流转回Init状态。
-    /// 3.处于 KeyUpFirstTime 状态，250毫秒内相同的键被再次按下了，那么【双击】行为发生了，流转回Init状态。
+    /// 2.处于 KeyUpFirstTime 状态，200毫秒内相同的键没有被再次按下（250毫秒内没有任何键按下、下一个事件上其它键的按下事件），那么【单击】行为发生了，流转回Init状态。
+    /// 3.处于 KeyUpFirstTime 状态，200毫秒内相同的键被再次按下了，那么【双击】行为发生了，流转回Init状态。
     KeyUpFirstTime(KeyEvent),
 }
 
@@ -204,7 +205,7 @@ impl State {
                 let () = future.await;
             }
             State::KeyUpFirstTime(_) => {
-                tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
             }
         }
     }
@@ -228,6 +229,29 @@ impl From<i32> for KeyAction {
     }
 }
 
+fn send_key_event(virtual_input_device: Arc<Mutex<VirtualDevice>>, key_action: KeyAction, key_code: KeyCode) {
+    let mut device = virtual_input_device.lock().unwrap();
+    if key_action == KeyAction::Pressed {
+        device.press(key_code.0).unwrap();
+    } else if key_action == KeyAction::Released {
+        device.release(key_code.0).unwrap();
+    }
+}
+
+fn send_mouse_event(virtual_input_device: Arc<Mutex<VirtualDevice>>, event: RelativeAxisEvent) {
+    let axis_code = event.code();
+    let mut device = virtual_input_device.lock().unwrap();
+    if axis_code == RelativeAxisCode::REL_X {
+        device.move_mouse_x(event.value()).unwrap();
+    }else if axis_code == RelativeAxisCode::REL_Y {
+        device.move_mouse_y(-event.value()).unwrap();
+    }else if axis_code == RelativeAxisCode::REL_WHEEL {
+        device.scroll_y(event.value()).unwrap();
+    } else if axis_code == RelativeAxisCode::REL_WHEEL_HI_RES {
+        device.scroll_y(event.value()).unwrap();
+    }
+}
+
 struct StateMachine {
     state: State,
     config: Config,
@@ -241,13 +265,13 @@ struct StateMachine {
     /// 与某个Key对应的规则
     key_rules: HashMap<KeyCode, Vec<Rule>>,
 
-    virtual_input_device: VirtualDevice,
+    virtual_input_device: Arc<Mutex<VirtualDevice>>,
 
     shortcut_with_key_holding: Option<Action>,
 }
 
 impl StateMachine {
-    fn new(config: Config, virtual_input_device: VirtualDevice) -> Self {
+    fn new(config: Config, virtual_input_device: Arc<Mutex<VirtualDevice>>) -> Self {
         let rules = &config.rules;
         let interest_keys = rules.iter().map(|rule| rule.key.into()).collect();
         let mut key_rule_types: HashMap<KeyCode, Vec<RuleType>> = HashMap::new();
@@ -281,24 +305,11 @@ impl StateMachine {
     }
 
     fn send_key_event(&mut self, key_action: KeyAction, key_code: KeyCode) {
-        if key_action == KeyAction::Pressed {
-            self.virtual_input_device.press(key_code.0).unwrap();
-        } else if key_action == KeyAction::Released {
-            self.virtual_input_device.release(key_code.0).unwrap();
-        }
+        send_key_event(self.virtual_input_device.clone(), key_action, key_code);
     }
 
     fn send_mouse_event(&mut self, event: RelativeAxisEvent) {
-        let axis_code = event.code();
-        if axis_code == RelativeAxisCode::REL_X {
-            self.virtual_input_device.move_mouse_x(event.value()).unwrap();
-        }else if axis_code == RelativeAxisCode::REL_Y {
-            self.virtual_input_device.move_mouse_y(-event.value()).unwrap();
-        }else if axis_code == RelativeAxisCode::REL_WHEEL {
-            self.virtual_input_device.scroll_y(event.value()).unwrap();
-        } else if axis_code == RelativeAxisCode::REL_WHEEL_HI_RES {
-            self.virtual_input_device.scroll_y(event.value()).unwrap();
-        }
+        send_mouse_event(self.virtual_input_device.clone(), event);
     }
 
     fn get_action_for(&self, key_code: &KeyCode, rule_type: &RuleType) -> Option<Action> {
@@ -317,10 +328,10 @@ impl StateMachine {
                 println!("Perform shortcut action: {}", s);
                 let key_codes = ShortcutString::get_key_codes(&s).unwrap();
                 for key_code in &key_codes {
-                    self.virtual_input_device.press(key_code.0).unwrap();
+                    self.send_key_event(KeyAction::Pressed, *key_code);
                 }
                 for key_code in &key_codes {
-                    self.virtual_input_device.release(key_code.0).unwrap();
+                    self.send_key_event(KeyAction::Released, *key_code);
                 }
             }
             Action::ShortcutWithKeyHolding(ShortcutString(s), HoldingKey(h)) => {
@@ -328,14 +339,14 @@ impl StateMachine {
                 let key_codes = ShortcutString::get_key_codes(&s).unwrap();
                 let holding_key = HoldingKey::get_key_codes(&h).unwrap();
                 if self.shortcut_with_key_holding.is_none() {
-                    self.virtual_input_device.press(holding_key.0).unwrap();
+                    self.send_key_event(KeyAction::Pressed, holding_key);
                     self.shortcut_with_key_holding = Some(action.clone());
                 }
                 for key in &key_codes {
-                    self.virtual_input_device.press(key.0).unwrap();
+                    self.send_key_event(KeyAction::Pressed, *key);
                 }
                 for key in &key_codes {
-                    self.virtual_input_device.release(key.0).unwrap();
+                    self.send_key_event(KeyAction::Released, *key);
                 }
             }
         }
@@ -353,7 +364,7 @@ impl StateMachine {
         if let Some(Action::ShortcutWithKeyHolding(ShortcutString(_), HoldingKey(h))) = &self.shortcut_with_key_holding {
             println!("Releasing holding key: {}", h);
             let holding_key = HoldingKey::get_key_codes(&h).unwrap();
-            self.virtual_input_device.release(holding_key.0).unwrap();
+            self.send_key_event(KeyAction::Released, holding_key);
             self.shortcut_with_key_holding = None;
         }
     }
@@ -403,7 +414,7 @@ impl StateMachine {
                             // 处于 KeyDownFirstTime 状态，如果下一个事件是其它键的按下事件，那么透传，同时状态流转回Init状态
                             self.send_key_event(KeyAction::Pressed, previous_key_down_event.code());
                             self.send_key_event(KeyAction::Pressed, key_event.code());
-                            self.state = State::Init;
+                            self.update_state(State::Init);
                         }else if key_action == KeyAction::Released && previous_key_down_event.code() == key_code {
                             if self.is_holding_key() {
                                 // 进入这里说明 ScrollWheelWithKeyPressed 事件已经发生
@@ -460,10 +471,8 @@ impl StateMachine {
                 }
             }
             EventSummary::RelativeAxis(axis_event, axis_code, _value) => {
-                if axis_code == RelativeAxisCode::REL_X || axis_code == RelativeAxisCode::REL_Y {
-                    // 鼠标移动事件，直接透传
-                    self.send_mouse_event(axis_event);
-                }else if axis_code == RelativeAxisCode::REL_WHEEL || axis_code == RelativeAxisCode::REL_WHEEL_HI_RES {
+                if axis_code == RelativeAxisCode::REL_WHEEL || axis_code == RelativeAxisCode::REL_WHEEL_HI_RES {
+                    // 鼠标滚轮事件
                     match self.state {
                         State::KeyDownFirstTime(previous_key_down_event) => {
                             if self.judge_interest(previous_key_down_event.code(), RuleType::ScrollWheelWithKeyPressed) {
@@ -480,7 +489,6 @@ impl StateMachine {
                         }
                     }
                 }
-
             }
 
             _ => {
@@ -517,6 +525,43 @@ impl StateMachine {
     }
 }
 
+struct FilteredMouseDevice {
+    event_stream: EventStream,
+    virtual_device: Arc<Mutex<VirtualDevice>>
+}
+
+impl FilteredMouseDevice {
+    fn new(event_stream: EventStream, virtual_device: Arc<Mutex<VirtualDevice>>) -> Self {
+        Self {
+            event_stream, virtual_device
+        }
+    }
+
+    async fn next_event(&mut self) -> io::Result<InputEvent> {
+        loop {
+            let mouse_event = self.event_stream.next_event().await?;
+
+            match mouse_event.destructure() {
+                EventSummary::Key(_, _, _) => {
+                    // 按键事件
+                    return Ok(mouse_event);
+                }
+                EventSummary::RelativeAxis(axis_event, axis_code, _value) => {
+                    if axis_code == RelativeAxisCode::REL_X || axis_code == RelativeAxisCode::REL_Y {
+                        // 鼠标移动事件，直接透传
+                        send_mouse_event(self.virtual_device.clone(), axis_event);
+                    }else if axis_code == RelativeAxisCode::REL_WHEEL || axis_code == RelativeAxisCode::REL_WHEEL_HI_RES {
+                        // 滚轮事件
+                        return Ok(mouse_event);
+                    }
+                }
+                _ => {
+                }
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let config = read_config().await;
@@ -528,13 +573,16 @@ async fn main() {
     mouse_device.grab().expect("Failed to grab mouse");
 
     let mut keyboard_event_stream = keyboard_device.into_event_stream().expect("Failed to initialize event stream");
-    let mut mouse_event_stream = mouse_device.into_event_stream().expect("Failed to initialize event stream");
+    let mouse_event_stream = mouse_device.into_event_stream().expect("Failed to initialize event stream");
 
-    let mut state_machine = StateMachine::new(config, VirtualDevice::default().unwrap());
+    let virtual_device = Arc::new(Mutex::new(VirtualDevice::default().expect("Failed to initialize virtual device")));
+    let mut filtered_mouse_device = FilteredMouseDevice::new(mouse_event_stream, virtual_device.clone());
+    let mut state_machine = StateMachine::new(config, virtual_device.clone());
+
     loop {
         let timeout_future = state_machine.state.timeout();
         let next_keyboard_event_future = keyboard_event_stream.next_event();
-        let next_mouse_event_future = mouse_event_stream.next_event();
+        let next_mouse_event_future = filtered_mouse_device.next_event();
 
         select! {
             _ = timeout_future => {
