@@ -402,14 +402,11 @@ impl StateMachine {
         match event.destructure() {
             EventSummary::Key(key_event, key_code, value) => {
                 let key_action: KeyAction = value.into();
-                println!("当前状态：{:?}, Key: {:?}, _value: {}, action: {:?}", self.state, key_event, value, key_action);
-
                 match self.state {
                     State::Init => {
                         if key_action == KeyAction::Pressed && self.interest_keys.contains(&key_code) {
                             self.update_state(State::KeyDownFirstTime(key_event));
                         }else {
-                            println!("透传{:?}事件", key_event);
                             self.send_key_event(key_action, key_code);
                         }
                     }
