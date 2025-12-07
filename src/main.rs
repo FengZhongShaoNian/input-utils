@@ -1,7 +1,7 @@
 use evdev::{Device, EventStream, EventSummary, InputEvent, KeyCode, KeyEvent, RelativeAxisCode, RelativeAxisEvent};
 use mouse_keyboard_input::VirtualDevice;
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::{future, io};
 use strum::{EnumIter};
@@ -90,7 +90,7 @@ impl<'de> Deserialize<'de> for Key {
     }
 }
 
-#[derive(Copy, Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Deserialize, Eq, PartialEq, Hash)]
 enum RuleType {
     /// 对某个键的【单击】事件感兴趣
     Click,
@@ -172,7 +172,13 @@ enum Action {
     ShortcutWithKeyHolding(ShortcutString, HoldingKey)
 }
 
-#[derive(Copy, Clone, Debug)]
+/// 表示某个键感兴趣的事件类型的集合
+type Interests = HashSet<RuleType>;
+
+/// 【按下某个键并滚动鼠标滚轮】事件是否已经发生
+type ScrollWheelWithKeyPressedHappened = bool;
+
+#[derive(Clone, Debug)]
 enum State {
     /// 初始状态
     Init,
@@ -184,14 +190,14 @@ enum State {
     /// 2. 处于 KeyDownFirstTime 状态，如果下一个事件是其它键的按下事件，那么透传，同时状态流转回Init状态。
     /// 3. 处于 KeyDownFirstTime 状态，如果下一个事件是当前键松开的事件，那么转为KeyUpFirstTime状态。
     /// 4. 处于 KeyDownFirstTime 状态，对应的键是鼠标右键，如果超时，那么透传并流转回Init状态。
-    KeyDownFirstTime(KeyEvent),
+    KeyDownFirstTime(KeyEvent, Interests, ScrollWheelWithKeyPressedHappened),
 
     /// 只有对某个键的【单击】、【双击】这2个事件的任一事件感兴趣，才会流转到这个状态。
     /// 某个键被首次松开。可能发生的行为有：单击、双击
     /// 1.处于 KeyUpFirstTime 状态，若对当前键的单击事件不感兴趣，那么判断是否需要关注它的双击事件，若只需要关注双击事件，那么不流转状态，若都不需要关注，那么透传并流转回Init状态
     /// 2.处于 KeyUpFirstTime 状态，150毫秒内相同的键没有被再次按下（250毫秒内没有任何键按下、下一个事件上其它键的按下事件），那么【单击】行为发生了，流转回Init状态。
     /// 3.处于 KeyUpFirstTime 状态，150毫秒内相同的键被再次按下了，那么【双击】行为发生了，流转回Init状态。
-    KeyUpFirstTime(KeyEvent),
+    KeyUpFirstTime(KeyEvent, Interests),
 }
 
 impl State {
@@ -201,18 +207,24 @@ impl State {
                 let future = future::pending();
                 let () = future.await;
             }
-            State::KeyDownFirstTime(ev) => {
-                // 避免按键被长时间摁住时，一些需要通过长按按键+移动鼠标的操作无法进行。
+            State::KeyDownFirstTime(_ev, interests, scroll_wheel_with_key_pressed_happened) => {
+                // 针对此状态设置超时时间是为了避免按键被长时间摁住时，一些需要通过长按按键+移动鼠标的操作无法进行。
                 // 例如：假如针对鼠标右键设置了双击规则，如果按下的键是鼠标右键，如果没有针对按键按下的状态设置超时事件，
                 // 而鼠标右键也一直不松开，也没有其它的按键事件/滚轮事件发生，那么鼠标右键按下的事件会被拦截，从而导致无法使用鼠标手势等需要摁住某个键并移动鼠标的功能无法正常使用。
-                if ev.code() == Key::BtnRight.into() {
-                    // 针对鼠标右键设置短一点的超时时间，让鼠标手势更顺滑一点
+
+                if !interests.contains(&RuleType::ScrollWheelWithKeyPressed) {
+                    // 如果某个按键对【按下某个键并滚动鼠标滚轮】事件不感兴趣，那么设置一个短一点的超时时间
                     tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+                } else if *scroll_wheel_with_key_pressed_happened == true{
+                    // 如果【按下某个键并滚动鼠标滚轮】事件已经发生，那么就不需要设置超时了，说明用户本次操作的目的就是执行【按下某个键并滚动鼠标滚轮】这个操作
+                    let future = future::pending();
+                    let () = future.await;
                 }else {
+                    // 对【按下某个键并滚动鼠标滚轮】事件感兴趣，但是这个事件尚未发生，那么稍微设置一个长一点的超时时间，因为这个事件的发生可能要慢一点（相较于【单击】/【双击】而言）
                     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
                 }
             }
-            State::KeyUpFirstTime(_) => {
+            State::KeyUpFirstTime(_ev, _interests) => {
                 tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
             }
         }
@@ -267,8 +279,8 @@ struct StateMachine {
     /// 感兴趣的KeyCode
     interest_keys: Vec<KeyCode>,
 
-    /// 与某个Key对应的规则类型
-    key_rule_types: HashMap<KeyCode, Vec<RuleType>>,
+    /// 某个Key感兴趣的所有事件类型
+    key_interests: HashMap<KeyCode, Interests>,
 
     /// 与某个Key对应的规则
     key_rules: HashMap<KeyCode, Vec<Rule>>,
@@ -282,15 +294,16 @@ impl StateMachine {
     fn new(config: Config, virtual_input_device: Arc<Mutex<VirtualDevice>>) -> Self {
         let rules = &config.rules;
         let interest_keys = rules.iter().map(|rule| rule.key.into()).collect();
-        let mut key_rule_types: HashMap<KeyCode, Vec<RuleType>> = HashMap::new();
+        let mut key_interests: HashMap<KeyCode, Interests> = HashMap::new();
         let mut key_rules: HashMap<KeyCode, Vec<Rule>> = HashMap::new();
         for rule in rules {
-            let types = key_rule_types.get_mut(&rule.key.into());
-             if let Some(types) = types {
-                 types.push(rule.rule_type.into());
+            let interests = key_interests.get_mut(&rule.key.into());
+             if let Some(interests) = interests {
+                 interests.insert(rule.rule_type.into());
              }else {
-                 let types = vec![rule.rule_type.into()];
-                 key_rule_types.insert(rule.key.into(), types);
+                 let mut interests = HashSet::new();
+                 interests.insert(rule.rule_type.into());
+                 key_interests.insert(rule.key.into(), interests);
              }
 
             let rules_for_key = key_rules.get_mut(&rule.key.into());
@@ -305,7 +318,7 @@ impl StateMachine {
             state: State::Init,
             config,
             interest_keys,
-            key_rule_types,
+            key_interests,
             key_rules,
             virtual_input_device,
             shortcut_with_key_holding: None,
@@ -379,8 +392,8 @@ impl StateMachine {
 
     /// 判断key_code是否对指定的rule_type感兴趣，感兴趣则返回true，否则返回false
     fn judge_interest(&self, key_code: KeyCode, rule_type: RuleType) -> bool {
-        if self.key_rule_types.contains_key(&key_code) {
-            if let Some(rule_types) = self.key_rule_types.get(&key_code) {
+        if self.key_interests.contains_key(&key_code) {
+            if let Some(rule_types) = self.key_interests.get(&key_code) {
                 rule_types.contains(&rule_type)
             }else {
                 false
@@ -401,18 +414,20 @@ impl StateMachine {
             println!("No rules");
             return;
         }
+        let current_state = self.state.clone();
         match event.destructure() {
             EventSummary::Key(key_event, key_code, value) => {
                 let key_action: KeyAction = value.into();
-                match self.state {
+                match current_state {
                     State::Init => {
                         if key_action == KeyAction::Pressed && self.interest_keys.contains(&key_code) {
-                            self.update_state(State::KeyDownFirstTime(key_event));
+                            let interests = self.key_interests.get(&key_code).unwrap();
+                            self.update_state(State::KeyDownFirstTime(key_event, interests.clone(), false));
                         }else {
                             self.send_key_event(key_action, key_code);
                         }
                     }
-                    State::KeyDownFirstTime(previous_key_down_event) => {
+                    State::KeyDownFirstTime(previous_key_down_event, interests, scroll_wheel_with_key_pressed_happened) => {
                         // 当前状态是 KeyDownFirstTime 状态，意味着至少对之前按下的这个键的【单击】、【双击】、【按下并滚动鼠标滚轮】这3个事件之一感兴趣
 
                         if key_action == KeyAction::Pressed && previous_key_down_event.code() != key_code {
@@ -421,7 +436,7 @@ impl StateMachine {
                             self.send_key_event(KeyAction::Pressed, key_event.code());
                             self.update_state(State::Init);
                         }else if key_action == KeyAction::Released && previous_key_down_event.code() == key_code {
-                            if self.is_holding_key() {
+                            if scroll_wheel_with_key_pressed_happened == true {
                                 // 进入这里说明 ScrollWheelWithKeyPressed 事件已经发生
                                 self.release_holding_key();
                                 self.update_state(State::Init);
@@ -431,23 +446,23 @@ impl StateMachine {
                             // 判断是否对当前键的单击或者双击事件感兴趣，
                             // 如果感兴趣，那么流转为 KeyUpFirstTime 状态
                             // 如果都不感兴趣，而当前又能走到 KeyDownFirstTime 状态，说明只对当前键的 ScrollWheelWithKeyPressed 事件感兴趣，那么流转回Init状态
-                            if self.judge_interest(previous_key_down_event.code(), RuleType::Click) ||
-                                self.judge_interest(previous_key_down_event.code(), RuleType::DoubleClick) {
-                                self.update_state(State::KeyUpFirstTime(key_event));
+                            if interests.contains(&RuleType::Click) ||
+                                interests.contains(&RuleType::DoubleClick) {
+                                self.update_state(State::KeyUpFirstTime(key_event, interests));
                             }else {
                                 // 只对当前键的 ScrollWheelWithKeyPressed 事件感兴趣
                                 self.update_state(State::Init);
                             }
                         }
                     }
-                    State::KeyUpFirstTime(previous_key_up_event) => {
+                    State::KeyUpFirstTime(previous_key_up_event, interests) => {
                         // 当前处于 KeyDownFirstTime ，说明至少对当前键的【单击】或者【双击】事件感兴趣
 
                         // 处于 KeyUpFirstTime 状态，如果下一个事件上其它键的按下事件，这意味着【单击】事件发生了，而且【双击】事件不可能发生
                         if key_action == KeyAction::Pressed && previous_key_up_event.code() != key_code {
                             // 判断是否对当前键的【单击】事件感兴趣，如果不感兴趣，说明只对它的【双击】事件感兴趣，但是【双击】事件不可能发生，那么流转回Init状态并把本次按键事件作为独立事件处理
                             // 如果感兴趣，那么执行相应的处理并流转回Init状态，然后处理本次的其它键按下事件。
-                            if self.judge_interest(previous_key_up_event.code(), RuleType::Click) {
+                            if interests.contains(&RuleType::Click) {
                                 println!("你单击了{:?}键", KeyEvent::from(previous_key_up_event));
                                 if let Some(action) = self.get_action_for(&previous_key_up_event.code(), &RuleType::Click) {
                                     self.perform_shortcut_action(&action);
@@ -456,7 +471,7 @@ impl StateMachine {
                             self.update_state(State::Init);
                             self.accept(event);
                         }else if key_action == KeyAction::Pressed && previous_key_up_event.code() == key_code {
-                            if self.judge_interest(previous_key_up_event.code(), RuleType::DoubleClick) {
+                            if interests.contains(&RuleType::DoubleClick) {
                                 // 处于 KeyUpFirstTime 状态，250毫秒内相同的键被再次按下了，那么【双击】行为发生了，流转回Init状态。
                                 println!("你双击了{:?}键", Key::from(previous_key_up_event.code()));
                                 if let Some(action) = self.get_action_for(&key_code, &RuleType::DoubleClick) {
@@ -478,12 +493,16 @@ impl StateMachine {
             EventSummary::RelativeAxis(axis_event, axis_code, _value) => {
                 if axis_code == RelativeAxisCode::REL_WHEEL || axis_code == RelativeAxisCode::REL_WHEEL_HI_RES {
                     // 鼠标滚轮事件
-                    match self.state {
-                        State::KeyDownFirstTime(previous_key_down_event) => {
-                            if self.judge_interest(previous_key_down_event.code(), RuleType::ScrollWheelWithKeyPressed) {
+                    match current_state {
+                        State::KeyDownFirstTime(previous_key_down_event, interests, scroll_wheel_with_key_pressed_happened) => {
+                            if interests.contains(&RuleType::ScrollWheelWithKeyPressed) {
                                 println!("【键持续按下并滚动鼠标滚轮】事件发生");
                                 if let Some(action) = self.get_action_for(&previous_key_down_event.code(), &RuleType::ScrollWheelWithKeyPressed) {
                                     self.perform_shortcut_action(&action);
+                                }
+                                if scroll_wheel_with_key_pressed_happened == false {
+                                    // 更新scroll_wheel_with_key_pressed_happened为true，避免KeyDownFirstTime状态的超时事件
+                                    self.update_state(State::KeyDownFirstTime(previous_key_down_event, interests, true));
                                 }
                             }else {
                                 self.send_mouse_event(axis_event);
@@ -507,18 +526,18 @@ impl StateMachine {
             State::Init => {
                 panic!("State::Init状态不应该存在超时事件");
             }
-            State::KeyDownFirstTime(previous_key_down_event) => {
+            State::KeyDownFirstTime(previous_key_down_event, _, _) => {
                 println!("KeyDownFirstTime的超时事件发生了");
                 // 如果KeyDownFirstTime的超时事件发生了，说明在按下这个键后的指定时间内没有别的动作（按下其它按键/松开按键/转动鼠标滚轮）
                 // 那么意味着【单击】、【双击】、【按下某个键并滚动鼠标滚轮】都不是本次操作的目的，因此透传并流转会Init状态
                 self.send_key_event(KeyAction::Pressed, previous_key_down_event.code());
                 self.update_state(State::Init);
             }
-            State::KeyUpFirstTime(previous_key_up_event) => {
+            State::KeyUpFirstTime(previous_key_up_event, _) => {
                 println!("KeyUpFirstTime的超时事件发生了");
                 // 当前状态是 KeyUpFirstTime 状态，意味着至少对【单击】、【双击】二者之一感兴趣
                 if self.judge_interest(previous_key_up_event.code(), RuleType::Click) {
-                    // 处于 KeyUpFirstTime 状态，250毫秒内没有任何键按下，那么【单击】行为发生了，流转回Init状态。
+                    // 处于 KeyUpFirstTime 状态，指定时间内没有任何键按下，那么【单击】行为发生了，流转回Init状态。
                     println!("你单击了{:?}键", Key::from(previous_key_up_event.code()));
                     if let Some(action) = self.get_action_for(&previous_key_up_event.code(), &RuleType::Click) {
                         self.perform_shortcut_action(&action);

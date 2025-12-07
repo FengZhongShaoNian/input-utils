@@ -34,6 +34,9 @@ mouse = "/dev/input/by-path/pci-0000:04:00.4-usb-0:2:1.0-event-mouse"
 #      这个例子中，当鼠标的侧键中靠后的那个键被按下的时候，如果滚动鼠标滚轮，此时ScrollWheelWithKeyPressed事件发生，
 #      开始按下左侧的Alt键并保持这个按下的状态，然后按下Esc键并松开，每滚动一次，就执行一次【按下Esc键并松开】操作，
 #      直到鼠标的那个侧键被松开。顺带一提：Alt+Esc在Gnome中被用了切换窗口。
+#
+# 【注意】!!!!!!!!!!!!!!!!!!
+#  key+rule_type的组合是不能重复的，也就是不能针对同一个key和同一个rule_type设置多个rules
 
 [[rules]]
 # 单击`input`中指定的键
