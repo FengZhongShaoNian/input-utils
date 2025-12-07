@@ -204,7 +204,7 @@ impl State {
             State::KeyDownFirstTime(ev) => {
                 // 如果按下的键是鼠标右键，那么设置超时事件，避免无法使用鼠标手势
                 if ev.code() == Key::BtnRight.into() {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
                 }else {
                     let future = future::pending();
                     let () = future.await;
