@@ -506,10 +506,12 @@ impl StateMachine {
                 panic!("State::Init状态不应该存在超时事件");
             }
             State::KeyDownFirstTime(previous_key_down_event) => {
+                println!("KeyDownFirstTime的超时事件发生了");
                 self.send_key_event(KeyAction::Pressed, previous_key_down_event.code());
                 self.update_state(State::Init);
             }
             State::KeyUpFirstTime(previous_key_up_event) => {
+                println!("KeyUpFirstTime的超时事件发生了");
                 // 当前状态是 KeyUpFirstTime 状态，意味着至少对【单击】、【双击】二者之一感兴趣
                 if self.judge_interest(previous_key_up_event.code(), RuleType::Click) {
                     // 处于 KeyUpFirstTime 状态，250毫秒内没有任何键按下，那么【单击】行为发生了，流转回Init状态。
