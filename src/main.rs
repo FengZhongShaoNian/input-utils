@@ -373,14 +373,6 @@ impl StateMachine {
         }
     }
 
-    fn is_holding_key(&self, ) -> bool {
-        if let Some(Action::ShortcutWithKeyHolding(ShortcutString(_), HoldingKey(_))) = &self.shortcut_with_key_holding {
-            true
-        }else {
-            false
-        }
-    }
-
     fn release_holding_key(&mut self) {
         if let Some(Action::ShortcutWithKeyHolding(ShortcutString(_), HoldingKey(h))) = &self.shortcut_with_key_holding {
             println!("Releasing holding key: {}", h);
