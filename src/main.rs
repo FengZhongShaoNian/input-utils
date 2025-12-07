@@ -202,12 +202,14 @@ impl State {
                 let () = future.await;
             }
             State::KeyDownFirstTime(ev) => {
-                // 如果按下的键是鼠标右键，那么设置超时事件，避免无法使用鼠标手势
+                // 避免按键被长时间摁住时，一些需要通过长按按键+移动鼠标的操作无法进行。
+                // 例如：假如针对鼠标右键设置了双击规则，如果按下的键是鼠标右键，如果没有针对按键按下的状态设置超时事件，
+                // 而鼠标右键也一直不松开，也没有其它的按键事件/滚轮事件发生，那么鼠标右键按下的事件会被拦截，从而导致无法使用鼠标手势等需要摁住某个键并移动鼠标的功能无法正常使用。
                 if ev.code() == Key::BtnRight.into() {
+                    // 针对鼠标右键设置短一点的超时时间，让鼠标手势更顺滑一点
                     tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
                 }else {
-                    let future = future::pending();
-                    let () = future.await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
                 }
             }
             State::KeyUpFirstTime(_) => {
@@ -507,6 +509,8 @@ impl StateMachine {
             }
             State::KeyDownFirstTime(previous_key_down_event) => {
                 println!("KeyDownFirstTime的超时事件发生了");
+                // 如果KeyDownFirstTime的超时事件发生了，说明在按下这个键后的指定时间内没有别的动作（按下其它按键/松开按键/转动鼠标滚轮）
+                // 那么意味着【单击】、【双击】、【按下某个键并滚动鼠标滚轮】都不是本次操作的目的，因此透传并流转会Init状态
                 self.send_key_event(KeyAction::Pressed, previous_key_down_event.code());
                 self.update_state(State::Init);
             }
