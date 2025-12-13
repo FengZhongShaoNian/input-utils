@@ -167,9 +167,28 @@ impl<'de> Deserialize<'de> for HoldingKey {
 enum Action {
     /// 参数是快捷键（例如："KEY_LEFTCTRL+KEY_C"）
     Shortcut(ShortcutString),
-    /// 第一个参数上快捷键（例如："KEY_LEFTALT+KEY_TAB"），第二个参数是需要持续按住的键（例如："KEY_LEFTALT"）
     /// 仅ScrollWheelWithKeyPressed类型的规则可以使用这种类型的快捷键
-    ShortcutWithKeyHolding(ShortcutString, HoldingKey)
+    ShortcutWithKeyHolding(ScrollShortcut)
+}
+
+/// 鼠标滚轮滚动方向以及对应的快捷键
+/// 仅ScrollWheelWithKeyPressed类型的规则可以使用这种类型的快捷键
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ScrollShortcut {
+    /// 向上滚的时候的快捷键（例如"KEY_LEFTSHIFT+KEY_TAB"）
+    up: ShortcutString,
+
+    /// 向下滚的时候的快捷键（例如："KEY_TAB"）
+    down: ShortcutString,
+
+    /// 需要持续按住的键（例如："KEY_LEFTALT"）
+    holding_key: HoldingKey
+}
+
+#[derive(Copy, Clone, Debug)]
+enum WheelDirection {
+    Up,
+    Down,
 }
 
 /// 表示某个键感兴趣的事件类型的集合
@@ -343,7 +362,7 @@ impl StateMachine {
         None
     }
 
-    fn perform_shortcut_action(&mut self, action: &Action) {
+    fn perform_shortcut_action(&mut self, action: &Action, wheel_direction: Option<WheelDirection>) {
         match action {
             Action::Shortcut(ShortcutString(s)) => {
                 println!("Perform shortcut action: {}", s);
@@ -355,7 +374,13 @@ impl StateMachine {
                     self.send_key_event(KeyAction::Released, *key_code);
                 }
             }
-            Action::ShortcutWithKeyHolding(ShortcutString(s), HoldingKey(h)) => {
+            Action::ShortcutWithKeyHolding(ScrollShortcut{up, down, holding_key}) => {
+                let wheel_direction = wheel_direction.unwrap_or(WheelDirection::Down);
+                let ShortcutString(s) = match wheel_direction {
+                    WheelDirection::Up => up,
+                    WheelDirection::Down => down,
+                };
+                let HoldingKey(h) = holding_key;
                 println!("Perform shortcut action: {}+{}, holding key is: {}", h, s, h);
                 let key_codes = ShortcutString::get_key_codes(&s).unwrap();
                 let holding_key = HoldingKey::get_key_codes(&h).unwrap();
@@ -374,7 +399,8 @@ impl StateMachine {
     }
 
     fn release_holding_key(&mut self) {
-        if let Some(Action::ShortcutWithKeyHolding(ShortcutString(_), HoldingKey(h))) = &self.shortcut_with_key_holding {
+        if let Some(Action::ShortcutWithKeyHolding(ScrollShortcut{ holding_key, .. })) = &self.shortcut_with_key_holding {
+            let HoldingKey(h) = holding_key;
             println!("Releasing holding key: {}", h);
             let holding_key = HoldingKey::get_key_codes(&h).unwrap();
             self.send_key_event(KeyAction::Released, holding_key);
@@ -457,7 +483,7 @@ impl StateMachine {
                             if interests.contains(&RuleType::Click) {
                                 println!("你单击了{:?}键", KeyEvent::from(previous_key_up_event));
                                 if let Some(action) = self.get_action_for(&previous_key_up_event.code(), &RuleType::Click) {
-                                    self.perform_shortcut_action(&action);
+                                    self.perform_shortcut_action(&action, None);
                                 }
                             }
                             self.update_state(State::Init);
@@ -467,7 +493,7 @@ impl StateMachine {
                                 // 处于 KeyUpFirstTime 状态，250毫秒内相同的键被再次按下了，那么【双击】行为发生了，流转回Init状态。
                                 println!("你双击了{:?}键", Key::from(previous_key_up_event.code()));
                                 if let Some(action) = self.get_action_for(&key_code, &RuleType::DoubleClick) {
-                                    self.perform_shortcut_action(&action);
+                                    self.perform_shortcut_action(&action, None);
                                 }
                                 self.update_state(State::Init);
                             }else {
@@ -482,20 +508,26 @@ impl StateMachine {
                     }
                 }
             }
-            EventSummary::RelativeAxis(axis_event, axis_code, _value) => {
+            EventSummary::RelativeAxis(axis_event, axis_code, value) => {
                 if axis_code == RelativeAxisCode::REL_WHEEL || axis_code == RelativeAxisCode::REL_WHEEL_HI_RES {
                     // 鼠标滚轮事件
                     match current_state {
                         State::KeyDownFirstTime(previous_key_down_event, interests, scroll_wheel_with_key_pressed_happened) => {
                             if interests.contains(&RuleType::ScrollWheelWithKeyPressed) {
-                                println!("【键持续按下并滚动鼠标滚轮】事件发生");
-                                if let Some(action) = self.get_action_for(&previous_key_down_event.code(), &RuleType::ScrollWheelWithKeyPressed) {
-                                    self.perform_shortcut_action(&action);
+                                // 经过实践发现，滚动一次鼠标滚轮，会同时REL_WHEEL和REL_WHEEL_HI_RES事件
+                                // 为了避免滚动一次滚轮触发两次【键持续按下并滚动鼠标滚轮】事件，这里仅对REL_WHEEL进行响应
+                                if axis_code  == RelativeAxisCode::REL_WHEEL {
+                                    println!("【键持续按下并滚动鼠标滚轮】事件发生");
+                                    if let Some(action) = self.get_action_for(&previous_key_down_event.code(), &RuleType::ScrollWheelWithKeyPressed) {
+                                        let wheel_direction = if value > 0 {WheelDirection::Up} else {WheelDirection::Down};
+                                        self.perform_shortcut_action(&action, Some(wheel_direction));
+                                    }
+                                    if scroll_wheel_with_key_pressed_happened == false {
+                                        // 更新scroll_wheel_with_key_pressed_happened为true，避免KeyDownFirstTime状态的超时事件
+                                        self.update_state(State::KeyDownFirstTime(previous_key_down_event, interests, true));
+                                    }
                                 }
-                                if scroll_wheel_with_key_pressed_happened == false {
-                                    // 更新scroll_wheel_with_key_pressed_happened为true，避免KeyDownFirstTime状态的超时事件
-                                    self.update_state(State::KeyDownFirstTime(previous_key_down_event, interests, true));
-                                }
+
                             }else {
                                 self.send_mouse_event(axis_event);
                             }
@@ -532,7 +564,7 @@ impl StateMachine {
                     // 处于 KeyUpFirstTime 状态，指定时间内没有任何键按下，那么【单击】行为发生了，流转回Init状态。
                     println!("你单击了{:?}键", Key::from(previous_key_up_event.code()));
                     if let Some(action) = self.get_action_for(&previous_key_up_event.code(), &RuleType::Click) {
-                        self.perform_shortcut_action(&action);
+                        self.perform_shortcut_action(&action, None);
                     }
                     self.update_state(State::Init);
                 }else {
