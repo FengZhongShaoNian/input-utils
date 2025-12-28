@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::{future, io};
 use strum::{EnumIter};
+use threadpool::ThreadPool;
 use tokio::select;
 
 #[derive(Debug, Deserialize)]
@@ -268,28 +269,53 @@ impl From<i32> for KeyAction {
     }
 }
 
-fn send_key_event(virtual_input_device: Arc<Mutex<VirtualDevice>>, key_action: KeyAction, key_code: KeyCode) {
-    let mut device = virtual_input_device.lock().unwrap();
-    if key_action == KeyAction::Pressed {
-        device.press(key_code.0).unwrap();
-    } else if key_action == KeyAction::Released {
-        device.release(key_code.0).unwrap();
+/// 虚拟键盘鼠标设备
+struct VirtualKeyboardMouse{
+    device: Arc<Mutex<VirtualDevice>>,
+    thread_pool: ThreadPool
+}
+
+impl VirtualKeyboardMouse {
+
+    fn new(device: VirtualDevice) -> Self {
+        Self {
+            device: Arc::new(Mutex::new(device)),
+            thread_pool: ThreadPool::new(1), // 单线程，以确保事件的顺序
+        }
+    }
+
+    fn send_key_event(&self, key_action: KeyAction, key_code: KeyCode) {
+        let device = self.device.clone();
+        // 放在单独的线程中执行以避免阻塞调用者线程
+        self.thread_pool.execute(move || {
+            let device = &mut device.lock().unwrap();
+            if key_action == KeyAction::Pressed {
+                device.press(key_code.0).unwrap();
+            } else if key_action == KeyAction::Released {
+                device.release(key_code.0).unwrap();
+            }
+        });
+    }
+
+    fn send_mouse_event(&self, event: RelativeAxisEvent) {
+        let device = self.device.clone();
+        // 放在单独的线程中执行以避免阻塞调用者线程
+        self.thread_pool.execute(move || {
+            let axis_code = event.code();
+            let mut device = device.lock().unwrap();
+            if axis_code == RelativeAxisCode::REL_X {
+                device.move_mouse_x(event.value()).unwrap();
+            }else if axis_code == RelativeAxisCode::REL_Y {
+                device.move_mouse_y(-event.value()).unwrap();
+            }else if axis_code == RelativeAxisCode::REL_WHEEL {
+                device.scroll_y(event.value()).unwrap();
+            } else if axis_code == RelativeAxisCode::REL_WHEEL_HI_RES {
+                device.scroll_y(event.value()).unwrap();
+            }
+        });
     }
 }
 
-fn send_mouse_event(virtual_input_device: Arc<Mutex<VirtualDevice>>, event: RelativeAxisEvent) {
-    let axis_code = event.code();
-    let mut device = virtual_input_device.lock().unwrap();
-    if axis_code == RelativeAxisCode::REL_X {
-        device.move_mouse_x(event.value()).unwrap();
-    }else if axis_code == RelativeAxisCode::REL_Y {
-        device.move_mouse_y(-event.value()).unwrap();
-    }else if axis_code == RelativeAxisCode::REL_WHEEL {
-        device.scroll_y(event.value()).unwrap();
-    } else if axis_code == RelativeAxisCode::REL_WHEEL_HI_RES {
-        device.scroll_y(event.value()).unwrap();
-    }
-}
 
 struct StateMachine {
     state: State,
@@ -304,13 +330,13 @@ struct StateMachine {
     /// 与某个Key对应的规则
     key_rules: HashMap<KeyCode, Vec<Rule>>,
 
-    virtual_input_device: Arc<Mutex<VirtualDevice>>,
+    virtual_keyboard_mouse: Arc<VirtualKeyboardMouse>,
 
     shortcut_with_key_holding: Option<Action>,
 }
 
 impl StateMachine {
-    fn new(config: Config, virtual_input_device: Arc<Mutex<VirtualDevice>>) -> Self {
+    fn new(config: Config, virtual_keyboard_mouse: Arc<VirtualKeyboardMouse>) -> Self {
         let rules = &config.rules;
         let interest_keys = rules.iter().map(|rule| rule.key.into()).collect();
         let mut key_interests: HashMap<KeyCode, Interests> = HashMap::new();
@@ -339,17 +365,17 @@ impl StateMachine {
             interest_keys,
             key_interests,
             key_rules,
-            virtual_input_device,
+            virtual_keyboard_mouse,
             shortcut_with_key_holding: None,
         }
     }
 
     fn send_key_event(&mut self, key_action: KeyAction, key_code: KeyCode) {
-        send_key_event(self.virtual_input_device.clone(), key_action, key_code);
+        self.virtual_keyboard_mouse.send_key_event(key_action, key_code);
     }
 
     fn send_mouse_event(&mut self, event: RelativeAxisEvent) {
-        send_mouse_event(self.virtual_input_device.clone(), event);
+        self.virtual_keyboard_mouse.send_mouse_event(event);
     }
 
     fn get_action_for(&self, key_code: &KeyCode, rule_type: &RuleType) -> Option<Action> {
@@ -580,13 +606,14 @@ impl StateMachine {
 
 struct FilteredMouseDevice {
     event_stream: EventStream,
-    virtual_device: Arc<Mutex<VirtualDevice>>
+    virtual_keyboard_mouse: Arc<VirtualKeyboardMouse>
 }
 
 impl FilteredMouseDevice {
-    fn new(event_stream: EventStream, virtual_device: Arc<Mutex<VirtualDevice>>) -> Self {
+    fn new(event_stream: EventStream, virtual_keyboard_mouse: Arc<VirtualKeyboardMouse>) -> Self {
         Self {
-            event_stream, virtual_device
+            event_stream,
+            virtual_keyboard_mouse
         }
     }
 
@@ -602,7 +629,7 @@ impl FilteredMouseDevice {
                 EventSummary::RelativeAxis(axis_event, axis_code, _value) => {
                     if axis_code == RelativeAxisCode::REL_X || axis_code == RelativeAxisCode::REL_Y {
                         // 鼠标移动事件，直接透传
-                        send_mouse_event(self.virtual_device.clone(), axis_event);
+                        self.virtual_keyboard_mouse.send_mouse_event(axis_event);
                     }else if axis_code == RelativeAxisCode::REL_WHEEL || axis_code == RelativeAxisCode::REL_WHEEL_HI_RES {
                         // 滚轮事件
                         return Ok(mouse_event);
@@ -628,9 +655,9 @@ async fn main() {
     let mut keyboard_event_stream = keyboard_device.into_event_stream().expect("Failed to initialize event stream");
     let mouse_event_stream = mouse_device.into_event_stream().expect("Failed to initialize event stream");
 
-    let virtual_device = Arc::new(Mutex::new(VirtualDevice::default().expect("Failed to initialize virtual device")));
-    let mut filtered_mouse_device = FilteredMouseDevice::new(mouse_event_stream, virtual_device.clone());
-    let mut state_machine = StateMachine::new(config, virtual_device.clone());
+    let virtual_keyboard_mouse = Arc::new(VirtualKeyboardMouse::new(VirtualDevice::default().expect("Failed to initialize virtual device")));
+    let mut filtered_mouse_device = FilteredMouseDevice::new(mouse_event_stream, virtual_keyboard_mouse.clone());
+    let mut state_machine = StateMachine::new(config, virtual_keyboard_mouse.clone());
 
     loop {
         let timeout_future = state_machine.state.timeout();
