@@ -1,17 +1,22 @@
-use evdev::{Device, EventStream, EventSummary, InputEvent, KeyCode, KeyEvent, RelativeAxisCode, RelativeAxisEvent};
+use evdev::{
+    Device, EventStream, EventSummary, InputEvent, KeyCode, KeyEvent, RelativeAxisCode,
+    RelativeAxisEvent,
+};
 use mouse_keyboard_input::VirtualDevice;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::future::pending;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::{future, io};
-use strum::{EnumIter};
+use strum::EnumIter;
 use threadpool::ThreadPool;
 use tokio::select;
 
 #[derive(Debug, Deserialize)]
 struct Config {
     devices: Devices,
-    rules: Vec<Rule>
+    rules: Vec<Rule>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,7 +31,7 @@ struct Rule {
     /// 对这个键的什么事件感兴趣
     rule_type: RuleType,
     /// 当感兴趣的事件发生时需要执行的操作
-    action: Action
+    action: Action,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, EnumIter, Hash)]
@@ -37,14 +42,14 @@ enum Key {
     RightAlt,
     LeftShift,
     RightShift,
-    LeftMeta, // 左侧的Win键
-    RightMeta,// 右侧的Win键
-    BtnSide, // 鼠标的两个侧键中靠后的那个键
-    BtnExtra, // 鼠标的两个侧键中靠前的那个键
-    BtnRight // 鼠标右键
+    LeftMeta,  // 左侧的Win键
+    RightMeta, // 右侧的Win键
+    BtnSide,   // 鼠标的两个侧键中靠后的那个键
+    BtnExtra,  // 鼠标的两个侧键中靠前的那个键
+    BtnRight,  // 鼠标右键
 }
 
-impl Into<KeyCode> for Key{
+impl Into<KeyCode> for Key {
     fn into(self) -> KeyCode {
         match self {
             Key::LeftCtrl => KeyCode::KEY_LEFTCTRL,
@@ -57,7 +62,7 @@ impl Into<KeyCode> for Key{
             Key::RightMeta => KeyCode::KEY_RIGHTMETA,
             Key::BtnSide => KeyCode::BTN_SIDE,
             Key::BtnExtra => KeyCode::BTN_EXTRA,
-            Key::BtnRight => KeyCode::BTN_RIGHT
+            Key::BtnRight => KeyCode::BTN_RIGHT,
         }
     }
 }
@@ -65,7 +70,7 @@ impl Into<KeyCode> for Key{
 impl From<KeyCode> for Key {
     fn from(value: KeyCode) -> Self {
         match value {
-            KeyCode::KEY_LEFTCTRL =>  Key::LeftCtrl,
+            KeyCode::KEY_LEFTCTRL => Key::LeftCtrl,
             KeyCode::KEY_RIGHTCTRL => Key::RightCtrl,
             KeyCode::KEY_LEFTALT => Key::LeftAlt,
             KeyCode::KEY_RIGHTALT => Key::RightAlt,
@@ -76,7 +81,7 @@ impl From<KeyCode> for Key {
             KeyCode::BTN_SIDE => Key::BtnSide,
             KeyCode::BTN_EXTRA => Key::BtnExtra,
             KeyCode::BTN_RIGHT => Key::BtnRight,
-            _ => panic!("Unsupported key {:?} for input", value)
+            _ => panic!("Unsupported key {:?} for input", value),
         }
     }
 }
@@ -84,10 +89,14 @@ impl From<KeyCode> for Key {
 impl<'de> Deserialize<'de> for Key {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: Deserializer<'de>
+        D: Deserializer<'de>,
     {
         let key_str = String::deserialize(deserializer)?;
-        key_str.trim().parse::<KeyCode>().map_err(serde::de::Error::custom).map(Key::from)
+        key_str
+            .trim()
+            .parse::<KeyCode>()
+            .map_err(serde::de::Error::custom)
+            .map(Key::from)
     }
 }
 
@@ -100,7 +109,7 @@ enum RuleType {
     DoubleClick,
 
     /// 对【按下某个键并滚动鼠标滚轮】事件感兴趣
-    ScrollWheelWithKeyPressed
+    ScrollWheelWithKeyPressed,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -132,7 +141,7 @@ impl ShortcutString {
 impl<'de> Deserialize<'de> for ShortcutString {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: Deserializer<'de>
+        D: Deserializer<'de>,
     {
         String::deserialize(deserializer)
             .and_then(|s| ShortcutString::new(s).map_err(serde::de::Error::custom))
@@ -148,7 +157,10 @@ impl HoldingKey {
     }
 
     pub fn get_key_codes(s: &str) -> Result<KeyCode, String> {
-        let key_code = s.trim().parse::<KeyCode>().map_err(|_|format!("Unable to parse key: {}", s))?;
+        let key_code = s
+            .trim()
+            .parse::<KeyCode>()
+            .map_err(|_| format!("Unable to parse key: {}", s))?;
         Ok(key_code)
     }
 }
@@ -156,7 +168,7 @@ impl HoldingKey {
 impl<'de> Deserialize<'de> for HoldingKey {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: Deserializer<'de>
+        D: Deserializer<'de>,
     {
         String::deserialize(deserializer)
             .and_then(|s| HoldingKey::new(s).map_err(serde::de::Error::custom))
@@ -169,7 +181,7 @@ enum Action {
     /// 参数是快捷键（例如："KEY_LEFTCTRL+KEY_C"）
     Shortcut(ShortcutString),
     /// 仅ScrollWheelWithKeyPressed类型的规则可以使用这种类型的快捷键
-    ShortcutWithKeyHolding(ScrollShortcut)
+    ShortcutWithKeyHolding(ScrollShortcut),
 }
 
 /// 鼠标滚轮滚动方向以及对应的快捷键
@@ -183,7 +195,7 @@ struct ScrollShortcut {
     down: ShortcutString,
 
     /// 需要持续按住的键（例如："KEY_LEFTALT"）
-    holding_key: HoldingKey
+    holding_key: HoldingKey,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -235,11 +247,11 @@ impl State {
                 if !interests.contains(&RuleType::ScrollWheelWithKeyPressed) {
                     // 如果某个按键对【按下某个键并滚动鼠标滚轮】事件不感兴趣，那么设置一个短一点的超时时间
                     tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-                } else if *scroll_wheel_with_key_pressed_happened == true{
+                } else if *scroll_wheel_with_key_pressed_happened == true {
                     // 如果【按下某个键并滚动鼠标滚轮】事件已经发生，那么就不需要设置超时了，说明用户本次操作的目的就是执行【按下某个键并滚动鼠标滚轮】这个操作
                     let future = future::pending();
                     let () = future.await;
-                }else {
+                } else {
                     // 对【按下某个键并滚动鼠标滚轮】事件感兴趣，但是这个事件尚未发生，那么稍微设置一个长一点的超时时间，因为这个事件的发生可能要慢一点（相较于【单击】/【双击】而言）
                     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
                 }
@@ -255,7 +267,7 @@ impl State {
 enum KeyAction {
     Pressed,
     Holding,
-    Released
+    Released,
 }
 
 impl From<i32> for KeyAction {
@@ -264,19 +276,18 @@ impl From<i32> for KeyAction {
             0 => KeyAction::Released,
             1 => KeyAction::Pressed,
             2 => KeyAction::Holding,
-            _ => panic!("Unknown key action for value: {}", value)
+            _ => panic!("Unknown key action for value: {}", value),
         }
     }
 }
 
 /// 虚拟键盘鼠标设备
-struct VirtualKeyboardMouse{
+struct VirtualKeyboardMouse {
     device: Arc<Mutex<VirtualDevice>>,
-    thread_pool: ThreadPool
+    thread_pool: ThreadPool,
 }
 
 impl VirtualKeyboardMouse {
-
     fn new(device: VirtualDevice) -> Self {
         Self {
             device: Arc::new(Mutex::new(device)),
@@ -305,9 +316,9 @@ impl VirtualKeyboardMouse {
             let mut device = device.lock().unwrap();
             if axis_code == RelativeAxisCode::REL_X {
                 device.move_mouse_x(event.value()).unwrap();
-            }else if axis_code == RelativeAxisCode::REL_Y {
+            } else if axis_code == RelativeAxisCode::REL_Y {
                 device.move_mouse_y(-event.value()).unwrap();
-            }else if axis_code == RelativeAxisCode::REL_WHEEL {
+            } else if axis_code == RelativeAxisCode::REL_WHEEL {
                 device.scroll_y(event.value()).unwrap();
             } else if axis_code == RelativeAxisCode::REL_WHEEL_HI_RES {
                 device.scroll_y(event.value()).unwrap();
@@ -315,7 +326,6 @@ impl VirtualKeyboardMouse {
         });
     }
 }
-
 
 struct StateMachine {
     state: State,
@@ -343,18 +353,18 @@ impl StateMachine {
         let mut key_rules: HashMap<KeyCode, Vec<Rule>> = HashMap::new();
         for rule in rules {
             let interests = key_interests.get_mut(&rule.key.into());
-             if let Some(interests) = interests {
-                 interests.insert(rule.rule_type.into());
-             }else {
-                 let mut interests = HashSet::new();
-                 interests.insert(rule.rule_type.into());
-                 key_interests.insert(rule.key.into(), interests);
-             }
+            if let Some(interests) = interests {
+                interests.insert(rule.rule_type.into());
+            } else {
+                let mut interests = HashSet::new();
+                interests.insert(rule.rule_type.into());
+                key_interests.insert(rule.key.into(), interests);
+            }
 
             let rules_for_key = key_rules.get_mut(&rule.key.into());
             if let Some(rules_for_key) = rules_for_key {
                 rules_for_key.push(rule.clone());
-            }else {
+            } else {
                 let rules_for_key = vec![rule.clone()];
                 key_rules.insert(rule.key.into(), rules_for_key);
             }
@@ -371,7 +381,8 @@ impl StateMachine {
     }
 
     fn send_key_event(&mut self, key_action: KeyAction, key_code: KeyCode) {
-        self.virtual_keyboard_mouse.send_key_event(key_action, key_code);
+        self.virtual_keyboard_mouse
+            .send_key_event(key_action, key_code);
     }
 
     fn send_mouse_event(&mut self, event: RelativeAxisEvent) {
@@ -388,7 +399,11 @@ impl StateMachine {
         None
     }
 
-    fn perform_shortcut_action(&mut self, action: &Action, wheel_direction: Option<WheelDirection>) {
+    fn perform_shortcut_action(
+        &mut self,
+        action: &Action,
+        wheel_direction: Option<WheelDirection>,
+    ) {
         match action {
             Action::Shortcut(ShortcutString(s)) => {
                 println!("Perform shortcut action: {}", s);
@@ -400,14 +415,21 @@ impl StateMachine {
                     self.send_key_event(KeyAction::Released, *key_code);
                 }
             }
-            Action::ShortcutWithKeyHolding(ScrollShortcut{up, down, holding_key}) => {
+            Action::ShortcutWithKeyHolding(ScrollShortcut {
+                up,
+                down,
+                holding_key,
+            }) => {
                 let wheel_direction = wheel_direction.unwrap_or(WheelDirection::Down);
                 let ShortcutString(s) = match wheel_direction {
                     WheelDirection::Up => up,
                     WheelDirection::Down => down,
                 };
                 let HoldingKey(h) = holding_key;
-                println!("Perform shortcut action: {}+{}, holding key is: {}", h, s, h);
+                println!(
+                    "Perform shortcut action: {}+{}, holding key is: {}",
+                    h, s, h
+                );
                 let key_codes = ShortcutString::get_key_codes(&s).unwrap();
                 let holding_key = HoldingKey::get_key_codes(&h).unwrap();
                 if self.shortcut_with_key_holding.is_none() {
@@ -425,7 +447,9 @@ impl StateMachine {
     }
 
     fn release_holding_key(&mut self) {
-        if let Some(Action::ShortcutWithKeyHolding(ScrollShortcut{ holding_key, .. })) = &self.shortcut_with_key_holding {
+        if let Some(Action::ShortcutWithKeyHolding(ScrollShortcut { holding_key, .. })) =
+            &self.shortcut_with_key_holding
+        {
             let HoldingKey(h) = holding_key;
             println!("Releasing holding key: {}", h);
             let holding_key = HoldingKey::get_key_codes(&h).unwrap();
@@ -439,10 +463,10 @@ impl StateMachine {
         if self.key_interests.contains_key(&key_code) {
             if let Some(rule_types) = self.key_interests.get(&key_code) {
                 rule_types.contains(&rule_type)
-            }else {
+            } else {
                 false
             }
-        }else {
+        } else {
             false
         }
     }
@@ -451,7 +475,7 @@ impl StateMachine {
         println!("Updating state from {:?} to {:?}", self.state, new_state);
         self.state = new_state;
     }
-    
+
     fn accept(&mut self, event: InputEvent) {
         let rules = &self.config.rules;
         if rules.is_empty() {
@@ -464,22 +488,36 @@ impl StateMachine {
                 let key_action: KeyAction = value.into();
                 match current_state {
                     State::Init => {
-                        if key_action == KeyAction::Pressed && self.interest_keys.contains(&key_code) {
+                        if key_action == KeyAction::Pressed
+                            && self.interest_keys.contains(&key_code)
+                        {
                             let interests = self.key_interests.get(&key_code).unwrap();
-                            self.update_state(State::KeyDownFirstTime(key_event, interests.clone(), false));
-                        }else {
+                            self.update_state(State::KeyDownFirstTime(
+                                key_event,
+                                interests.clone(),
+                                false,
+                            ));
+                        } else {
                             self.send_key_event(key_action, key_code);
                         }
                     }
-                    State::KeyDownFirstTime(previous_key_down_event, interests, scroll_wheel_with_key_pressed_happened) => {
+                    State::KeyDownFirstTime(
+                        previous_key_down_event,
+                        interests,
+                        scroll_wheel_with_key_pressed_happened,
+                    ) => {
                         // 当前状态是 KeyDownFirstTime 状态，意味着至少对之前按下的这个键的【单击】、【双击】、【按下并滚动鼠标滚轮】这3个事件之一感兴趣
 
-                        if key_action == KeyAction::Pressed && previous_key_down_event.code() != key_code {
+                        if key_action == KeyAction::Pressed
+                            && previous_key_down_event.code() != key_code
+                        {
                             // 处于 KeyDownFirstTime 状态，如果下一个事件是其它键的按下事件，那么透传，同时状态流转回Init状态
                             self.send_key_event(KeyAction::Pressed, previous_key_down_event.code());
                             self.send_key_event(KeyAction::Pressed, key_event.code());
                             self.update_state(State::Init);
-                        }else if key_action == KeyAction::Released && previous_key_down_event.code() == key_code {
+                        } else if key_action == KeyAction::Released
+                            && previous_key_down_event.code() == key_code
+                        {
                             if scroll_wheel_with_key_pressed_happened == true {
                                 // 进入这里说明 ScrollWheelWithKeyPressed 事件已经发生
                                 self.release_holding_key();
@@ -490,10 +528,11 @@ impl StateMachine {
                             // 判断是否对当前键的单击或者双击事件感兴趣，
                             // 如果感兴趣，那么流转为 KeyUpFirstTime 状态
                             // 如果都不感兴趣，而当前又能走到 KeyDownFirstTime 状态，说明只对当前键的 ScrollWheelWithKeyPressed 事件感兴趣，那么流转回Init状态
-                            if interests.contains(&RuleType::Click) ||
-                                interests.contains(&RuleType::DoubleClick) {
+                            if interests.contains(&RuleType::Click)
+                                || interests.contains(&RuleType::DoubleClick)
+                            {
                                 self.update_state(State::KeyUpFirstTime(key_event, interests));
-                            }else {
+                            } else {
                                 // 只对当前键的 ScrollWheelWithKeyPressed 事件感兴趣
                                 self.update_state(State::Init);
                             }
@@ -503,26 +542,34 @@ impl StateMachine {
                         // 当前处于 KeyDownFirstTime ，说明至少对当前键的【单击】或者【双击】事件感兴趣
 
                         // 处于 KeyUpFirstTime 状态，如果下一个事件上其它键的按下事件，这意味着【单击】事件发生了，而且【双击】事件不可能发生
-                        if key_action == KeyAction::Pressed && previous_key_up_event.code() != key_code {
+                        if key_action == KeyAction::Pressed
+                            && previous_key_up_event.code() != key_code
+                        {
                             // 判断是否对当前键的【单击】事件感兴趣，如果不感兴趣，说明只对它的【双击】事件感兴趣，但是【双击】事件不可能发生，那么流转回Init状态并把本次按键事件作为独立事件处理
                             // 如果感兴趣，那么执行相应的处理并流转回Init状态，然后处理本次的其它键按下事件。
                             if interests.contains(&RuleType::Click) {
                                 println!("你单击了{:?}键", KeyEvent::from(previous_key_up_event));
-                                if let Some(action) = self.get_action_for(&previous_key_up_event.code(), &RuleType::Click) {
+                                if let Some(action) = self
+                                    .get_action_for(&previous_key_up_event.code(), &RuleType::Click)
+                                {
                                     self.perform_shortcut_action(&action, None);
                                 }
                             }
                             self.update_state(State::Init);
                             self.accept(event);
-                        }else if key_action == KeyAction::Pressed && previous_key_up_event.code() == key_code {
+                        } else if key_action == KeyAction::Pressed
+                            && previous_key_up_event.code() == key_code
+                        {
                             if interests.contains(&RuleType::DoubleClick) {
                                 // 处于 KeyUpFirstTime 状态，250毫秒内相同的键被再次按下了，那么【双击】行为发生了，流转回Init状态。
                                 println!("你双击了{:?}键", Key::from(previous_key_up_event.code()));
-                                if let Some(action) = self.get_action_for(&key_code, &RuleType::DoubleClick) {
+                                if let Some(action) =
+                                    self.get_action_for(&key_code, &RuleType::DoubleClick)
+                                {
                                     self.perform_shortcut_action(&action, None);
                                 }
                                 self.update_state(State::Init);
-                            }else {
+                            } else {
                                 // 对当前键的【双击】事件不感兴趣，那么意味着需要透传当前键的双击事件，然后流转回Init状态
                                 self.send_key_event(KeyAction::Pressed, key_code);
                                 self.send_key_event(KeyAction::Released, key_code);
@@ -535,40 +582,57 @@ impl StateMachine {
                 }
             }
             EventSummary::RelativeAxis(axis_event, axis_code, value) => {
-                if axis_code == RelativeAxisCode::REL_WHEEL || axis_code == RelativeAxisCode::REL_WHEEL_HI_RES {
+                if axis_code == RelativeAxisCode::REL_WHEEL
+                    || axis_code == RelativeAxisCode::REL_WHEEL_HI_RES
+                {
                     // 鼠标滚轮事件
                     match current_state {
-                        State::KeyDownFirstTime(previous_key_down_event, interests, scroll_wheel_with_key_pressed_happened) => {
+                        State::KeyDownFirstTime(
+                            previous_key_down_event,
+                            interests,
+                            scroll_wheel_with_key_pressed_happened,
+                        ) => {
                             if interests.contains(&RuleType::ScrollWheelWithKeyPressed) {
                                 // 经过实践发现，滚动一次鼠标滚轮，会同时REL_WHEEL和REL_WHEEL_HI_RES事件
                                 // 为了避免滚动一次滚轮触发两次【键持续按下并滚动鼠标滚轮】事件，这里仅对REL_WHEEL进行响应
-                                if axis_code  == RelativeAxisCode::REL_WHEEL {
+                                if axis_code == RelativeAxisCode::REL_WHEEL {
                                     println!("【键持续按下并滚动鼠标滚轮】事件发生");
-                                    if let Some(action) = self.get_action_for(&previous_key_down_event.code(), &RuleType::ScrollWheelWithKeyPressed) {
-                                        let wheel_direction = if value > 0 {WheelDirection::Up} else {WheelDirection::Down};
-                                        self.perform_shortcut_action(&action, Some(wheel_direction));
+                                    if let Some(action) = self.get_action_for(
+                                        &previous_key_down_event.code(),
+                                        &RuleType::ScrollWheelWithKeyPressed,
+                                    ) {
+                                        let wheel_direction = if value > 0 {
+                                            WheelDirection::Up
+                                        } else {
+                                            WheelDirection::Down
+                                        };
+                                        self.perform_shortcut_action(
+                                            &action,
+                                            Some(wheel_direction),
+                                        );
                                     }
                                     if scroll_wheel_with_key_pressed_happened == false {
                                         // 更新scroll_wheel_with_key_pressed_happened为true，避免KeyDownFirstTime状态的超时事件
-                                        self.update_state(State::KeyDownFirstTime(previous_key_down_event, interests, true));
+                                        self.update_state(State::KeyDownFirstTime(
+                                            previous_key_down_event,
+                                            interests,
+                                            true,
+                                        ));
                                     }
                                 }
-
-                            }else {
+                            } else {
                                 self.send_mouse_event(axis_event);
                             }
                         }
-                       _ => {
+                        _ => {
                             self.send_mouse_event(axis_event);
                         }
                     }
                 }
             }
 
-            _ => {
-            }
+            _ => {}
         }
-
     }
 
     fn timeout(&mut self) {
@@ -589,11 +653,13 @@ impl StateMachine {
                 if self.judge_interest(previous_key_up_event.code(), RuleType::Click) {
                     // 处于 KeyUpFirstTime 状态，指定时间内没有任何键按下，那么【单击】行为发生了，流转回Init状态。
                     println!("你单击了{:?}键", Key::from(previous_key_up_event.code()));
-                    if let Some(action) = self.get_action_for(&previous_key_up_event.code(), &RuleType::Click) {
+                    if let Some(action) =
+                        self.get_action_for(&previous_key_up_event.code(), &RuleType::Click)
+                    {
                         self.perform_shortcut_action(&action, None);
                     }
                     self.update_state(State::Init);
-                }else {
+                } else {
                     // 只对双击感兴趣，但是超时了，透传并流转回Init状态
                     self.send_key_event(KeyAction::Pressed, previous_key_up_event.code());
                     self.send_key_event(KeyAction::Released, previous_key_up_event.code());
@@ -606,14 +672,14 @@ impl StateMachine {
 
 struct FilteredMouseDevice {
     event_stream: EventStream,
-    virtual_keyboard_mouse: Arc<VirtualKeyboardMouse>
+    virtual_keyboard_mouse: Arc<VirtualKeyboardMouse>,
 }
 
 impl FilteredMouseDevice {
     fn new(event_stream: EventStream, virtual_keyboard_mouse: Arc<VirtualKeyboardMouse>) -> Self {
         Self {
             event_stream,
-            virtual_keyboard_mouse
+            virtual_keyboard_mouse,
         }
     }
 
@@ -627,18 +693,45 @@ impl FilteredMouseDevice {
                     return Ok(mouse_event);
                 }
                 EventSummary::RelativeAxis(axis_event, axis_code, _value) => {
-                    if axis_code == RelativeAxisCode::REL_X || axis_code == RelativeAxisCode::REL_Y {
+                    if axis_code == RelativeAxisCode::REL_X || axis_code == RelativeAxisCode::REL_Y
+                    {
                         // 鼠标移动事件，直接透传
                         self.virtual_keyboard_mouse.send_mouse_event(axis_event);
-                    }else if axis_code == RelativeAxisCode::REL_WHEEL || axis_code == RelativeAxisCode::REL_WHEEL_HI_RES {
+                    } else if axis_code == RelativeAxisCode::REL_WHEEL
+                        || axis_code == RelativeAxisCode::REL_WHEEL_HI_RES
+                    {
                         // 滚轮事件
                         return Ok(mouse_event);
                     }
                 }
-                _ => {
-                }
+                _ => {}
             }
         }
+    }
+}
+
+fn open_device_for_event_stream(device_path: &str) -> Option<EventStream> {
+    let device = Device::open(device_path).ok();
+    if let Some(mut device) = device {
+        match device.grab() {
+            Ok(_) => match device.into_event_stream() {
+                Ok(event_stream) => Some(event_stream),
+                Err(e) => {
+                    println!(
+                        "[WARN] Failed to open event stream for device [{}]: {}",
+                        device_path, e
+                    );
+                    None
+                }
+            },
+            Err(e) => {
+                println!("[WARN] Failed to grabbing device [{}]: {}", device_path, e);
+                None
+            }
+        }
+    } else {
+        println!("[WARN] Could not open device: {}", device_path);
+        None
     }
 }
 
@@ -646,23 +739,33 @@ impl FilteredMouseDevice {
 async fn main() {
     let config = read_config().await;
 
-    let mut keyboard_device = Device::open(config.devices.keyboard.as_str()).expect(&format!("Failed to open device [{}]", config.devices.keyboard));
-    keyboard_device.grab().expect("Failed to grab keyboard");
+    let mut keyboard_event_stream = open_device_for_event_stream(&config.devices.keyboard);
+    let mouse_event_stream = open_device_for_event_stream(&config.devices.mouse);
 
-    let mut mouse_device = Device::open(config.devices.mouse.as_str()).expect(&format!("Failed to open device [{}]", config.devices.mouse));
-    mouse_device.grab().expect("Failed to grab mouse");
+    if keyboard_event_stream.is_none() && mouse_event_stream.is_none() {
+        panic!("Both keyboard event stream and mouse event stream not found");
+    }
 
-    let mut keyboard_event_stream = keyboard_device.into_event_stream().expect("Failed to initialize event stream");
-    let mouse_event_stream = mouse_device.into_event_stream().expect("Failed to initialize event stream");
-
-    let virtual_keyboard_mouse = Arc::new(VirtualKeyboardMouse::new(VirtualDevice::default().expect("Failed to initialize virtual device")));
-    let mut filtered_mouse_device = FilteredMouseDevice::new(mouse_event_stream, virtual_keyboard_mouse.clone());
+    let virtual_keyboard_mouse = Arc::new(VirtualKeyboardMouse::new(
+        VirtualDevice::default().expect("Failed to initialize virtual device"),
+    ));
+    let mut filtered_mouse_device = mouse_event_stream.map(|mouse_event_stream| {
+        FilteredMouseDevice::new(mouse_event_stream, virtual_keyboard_mouse.clone())
+    });
     let mut state_machine = StateMachine::new(config, virtual_keyboard_mouse.clone());
 
     loop {
         let timeout_future = state_machine.state.timeout();
-        let next_keyboard_event_future = keyboard_event_stream.next_event();
-        let next_mouse_event_future = filtered_mouse_device.next_event();
+        let next_keyboard_event_future: Pin<Box<dyn Future<Output = io::Result<InputEvent>>>> =
+            match keyboard_event_stream {
+                Some(ref mut event_stream) => Box::pin(event_stream.next_event()),
+                None => Box::pin(pending()),
+            };
+        let next_mouse_event_future: Pin<Box<dyn Future<Output = io::Result<InputEvent>>>> =
+            match filtered_mouse_device {
+                Some(ref mut filtered_mouse_device) => Box::pin(filtered_mouse_device.next_event()),
+                None => Box::pin(pending()),
+            };
 
         select! {
             _ = timeout_future => {
@@ -683,7 +786,9 @@ async fn read_config() -> Config {
     println!("exe_path: {}", exe_path.display());
 
     let config_file = exe_path.parent().unwrap().join("config.toml");
-    let config_toml = tokio::fs::read_to_string(&config_file).await.expect("Failed to read config.json");
+    let config_toml = tokio::fs::read_to_string(&config_file)
+        .await
+        .expect("Failed to read config.json");
     println!("config.toml:\n{}", config_toml);
 
     let config: Config = toml::from_str(&config_toml).unwrap();
