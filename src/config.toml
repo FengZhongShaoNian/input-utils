@@ -1,6 +1,17 @@
 [devices]
-keyboard = "/dev/input/by-path/pci-0000:04:00.4-usb-0:1:1.0-event-kbd"
-mouse = "/dev/input/by-path/pci-0000:04:00.4-usb-0:2:1.0-event-mouse"
+# 这里可以指定多个候选的键盘设备，但仅使用其中的一个设备
+# 当数组中的第一个设备不可用时，尝试使用第二个设备，以此类推
+keyboard = [
+    "/dev/input/by-path/pci-0000:04:00.4-usb-0:1:1.0-event-kbd",
+    "/dev/input/by-path/platform-i8042-serio-0-event-kbd"
+]
+
+# 这里可以指定多个候选的鼠标设备，但仅使用其中的一个设备
+# 当数组中的第一个设备不可用时，尝试使用第二个设备，以此类推
+mouse = [
+    "/dev/input/by-path/pci-0000:04:00.4-usb-0:2:1.0-event-mouse",
+    "/dev/input/by-path/pci-0000:04:00.4-usb-0:1:1.0-event-mouse"
+]
 
 # rules 说明：
 #（1）key字段只支持如下的键：

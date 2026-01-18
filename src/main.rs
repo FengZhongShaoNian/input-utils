@@ -6,9 +6,10 @@ use mouse_keyboard_input::VirtualDevice;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::future::pending;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::{future, io};
+use std::{fs, future, io};
 use strum::EnumIter;
 use threadpool::ThreadPool;
 use tokio::select;
@@ -21,8 +22,8 @@ struct Config {
 
 #[derive(Debug, Deserialize)]
 struct Devices {
-    keyboard: String,
-    mouse: String,
+    keyboard: Vec<String>,
+    mouse: Vec<String>,
 }
 #[derive(Debug, Deserialize, Clone)]
 struct Rule {
@@ -735,12 +736,35 @@ fn open_device_for_event_stream(device_path: &str) -> Option<EventStream> {
     }
 }
 
+fn get_available_device(devices: &Vec<String>) -> Option<String> {
+    for device in devices {
+        let path = Path::new(&device);
+        if fs::exists(path).expect(&format!("Failed to check device existence: {device}")) {
+            return Some(device.to_string());
+        }
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() {
     let config = read_config().await;
 
-    let mut keyboard_event_stream = open_device_for_event_stream(&config.devices.keyboard);
-    let mouse_event_stream = open_device_for_event_stream(&config.devices.mouse);
+    let keyboard_device = get_available_device(&config.devices.keyboard);
+    let mouse_device = get_available_device(&config.devices.mouse);
+    if keyboard_device.is_none() && mouse_device.is_none() {
+        panic!("Both keyboard devices and mouse devices are not found");
+    }
+    let mut keyboard_event_stream = if let Some(device) = keyboard_device {
+        open_device_for_event_stream(&device)
+    } else {
+        None
+    };
+    let mouse_event_stream = if let Some(device) = mouse_device {
+        open_device_for_event_stream(&device)
+    } else {
+        None
+    };
 
     if keyboard_event_stream.is_none() && mouse_event_stream.is_none() {
         panic!("Both keyboard event stream and mouse event stream not found");
