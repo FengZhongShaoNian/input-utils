@@ -740,6 +740,7 @@ fn get_available_device(devices: &Vec<String>) -> Option<String> {
     for device in devices {
         let path = Path::new(&device);
         if fs::exists(path).expect(&format!("Failed to check device existence: {device}")) {
+            println!("Found device [{}]", device);
             return Some(device.to_string());
         }
     }
