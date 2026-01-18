@@ -5,7 +5,6 @@ use evdev::{
 use mouse_keyboard_input::VirtualDevice;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::future::pending;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -483,6 +482,7 @@ impl StateMachine {
             println!("No rules");
             return;
         }
+        println!("Accepting input event: {:?}", event);
         let current_state = self.state.clone();
         match event.destructure() {
             EventSummary::Key(key_event, key_code, value) => {
@@ -671,12 +671,12 @@ impl StateMachine {
     }
 }
 
-struct FilteredMouseDevice {
+struct FilteredDevice {
     event_stream: EventStream,
     virtual_keyboard_mouse: Arc<VirtualKeyboardMouse>,
 }
 
-impl FilteredMouseDevice {
+impl FilteredDevice {
     fn new(event_stream: EventStream, virtual_keyboard_mouse: Arc<VirtualKeyboardMouse>) -> Self {
         Self {
             event_stream,
@@ -686,12 +686,24 @@ impl FilteredMouseDevice {
 
     async fn next_event(&mut self) -> io::Result<InputEvent> {
         loop {
-            let mouse_event = self.event_stream.next_event().await?;
+            let input_event = self.event_stream.next_event().await?;
 
-            match mouse_event.destructure() {
-                EventSummary::Key(_, _, _) => {
+            match input_event.destructure() {
+                EventSummary::Key(_, _, value) => {
                     // 按键事件
-                    return Ok(mouse_event);
+                    // 忽略长按事件，因为长按事件会在按键被长按时源源不断地产生，如果不忽略这些事件的话，
+                    // 这会导致状态机的超时事件失效（因为select!的作用是允许同时等待多个计算操作，
+                    // 然后当其中一个操作完成时就退出等待，因此如果长按事件先到来了，超时事件就不会得到处理）
+                    // 举个例子：如果打算使用【按下Super键然后按下鼠标右键并拖动鼠标】来调整窗口大小（Gnome可以通过GNOME Tweaks工具配置这个功能），
+                    // 如果不忽略掉长按Super键产生的事件，当鼠标右键配置了双击规则，先按下Super键，接着按下鼠标右键，由于鼠标右键的配置了双击规则，
+                    // 它需要一个超时事件来判断双击行为是否发生了，或者是否需要透传鼠标右键按下的事件，然而由于【长按事件】的存在，超时事件得不到处理，
+                    // 鼠标右键按下的事件就会被状态机一直拿在手里，导致Gnome没有收到鼠标右键按下的消息，从而不会调整窗口大小
+                    let long_pressed = value == 2;
+                    if long_pressed {
+                        // 啥也不做
+                    }else {
+                        return Ok(input_event);
+                    }
                 }
                 EventSummary::RelativeAxis(axis_event, axis_code, _value) => {
                     if axis_code == RelativeAxisCode::REL_X || axis_code == RelativeAxisCode::REL_Y
@@ -702,9 +714,10 @@ impl FilteredMouseDevice {
                         || axis_code == RelativeAxisCode::REL_WHEEL_HI_RES
                     {
                         // 滚轮事件
-                        return Ok(mouse_event);
+                        return Ok(input_event);
                     }
                 }
+                // 忽略其它事件
                 _ => {}
             }
         }
@@ -747,6 +760,25 @@ fn get_available_device(devices: &Vec<String>) -> Option<String> {
     None
 }
 
+struct NullableDevice {
+    device: Option<FilteredDevice>
+}
+
+impl NullableDevice {
+    fn new(device: Option<FilteredDevice>) -> Self {
+        Self { device }
+    }
+
+    async fn next_event(&mut self) -> io::Result<InputEvent> {
+        loop {
+            if let Some(ref mut device) = self.device {
+                let event = device.next_event().await;
+                return event;
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let config = read_config().await;
@@ -774,23 +806,21 @@ async fn main() {
     let virtual_keyboard_mouse = Arc::new(VirtualKeyboardMouse::new(
         VirtualDevice::default().expect("Failed to initialize virtual device"),
     ));
-    let mut filtered_mouse_device = mouse_event_stream.map(|mouse_event_stream| {
-        FilteredMouseDevice::new(mouse_event_stream, virtual_keyboard_mouse.clone())
+    let mut filtered_keyboard_device = keyboard_event_stream.map(|event_stream| {
+        FilteredDevice::new(event_stream, virtual_keyboard_mouse.clone())
+    });
+    let mut filtered_mouse_device = mouse_event_stream.map(|event_stream| {
+        FilteredDevice::new(event_stream, virtual_keyboard_mouse.clone())
     });
     let mut state_machine = StateMachine::new(config, virtual_keyboard_mouse.clone());
 
+    let mut filtered_keyboard_device = NullableDevice::new(filtered_keyboard_device);
+    let mut filtered_mouse_device = NullableDevice::new(filtered_mouse_device);
+
     loop {
         let timeout_future = state_machine.state.timeout();
-        let next_keyboard_event_future: Pin<Box<dyn Future<Output = io::Result<InputEvent>>>> =
-            match keyboard_event_stream {
-                Some(ref mut event_stream) => Box::pin(event_stream.next_event()),
-                None => Box::pin(pending()),
-            };
-        let next_mouse_event_future: Pin<Box<dyn Future<Output = io::Result<InputEvent>>>> =
-            match filtered_mouse_device {
-                Some(ref mut filtered_mouse_device) => Box::pin(filtered_mouse_device.next_event()),
-                None => Box::pin(pending()),
-            };
+        let next_keyboard_event_future = filtered_keyboard_device.next_event();
+        let next_mouse_event_future = filtered_mouse_device.next_event();
 
         select! {
             _ = timeout_future => {
