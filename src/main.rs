@@ -5,6 +5,7 @@ use evdev::{
 use mouse_keyboard_input::VirtualDevice;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::future::pending;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -701,7 +702,7 @@ impl FilteredDevice {
                     let long_pressed = value == 2;
                     if long_pressed {
                         // 啥也不做
-                    }else {
+                    } else {
                         return Ok(input_event);
                     }
                 }
@@ -730,9 +731,12 @@ fn open_device_for_event_stream(device_path: &str) -> Option<EventStream> {
         match device.grab() {
             Ok(_) => match device.into_event_stream() {
                 Ok(event_stream) => {
-                    println!("[INFO] Opened event stream successfully, device path: {}", device_path);
+                    println!(
+                        "[INFO] Opened event stream successfully, device path: {}",
+                        device_path
+                    );
                     Some(event_stream)
-                },
+                }
                 Err(e) => {
                     println!(
                         "[WARN] Failed to open event stream for device [{}]: {}",
@@ -764,7 +768,7 @@ fn get_available_device(devices: &Vec<String>) -> Option<String> {
 }
 
 struct NullableDevice {
-    device: Option<FilteredDevice>
+    device: Option<FilteredDevice>,
 }
 
 impl NullableDevice {
@@ -773,11 +777,11 @@ impl NullableDevice {
     }
 
     async fn next_event(&mut self) -> io::Result<InputEvent> {
-        loop {
-            if let Some(ref mut device) = self.device {
-                let event = device.next_event().await;
-                return event;
-            }
+        if let Some(ref mut device) = self.device {
+            let event = device.next_event().await;
+            event
+        } else {
+            pending().await
         }
     }
 }
@@ -809,12 +813,10 @@ async fn main() {
     let virtual_keyboard_mouse = Arc::new(VirtualKeyboardMouse::new(
         VirtualDevice::default().expect("Failed to initialize virtual device"),
     ));
-    let filtered_keyboard_device = keyboard_event_stream.map(|event_stream| {
-        FilteredDevice::new(event_stream, virtual_keyboard_mouse.clone())
-    });
-    let filtered_mouse_device = mouse_event_stream.map(|event_stream| {
-        FilteredDevice::new(event_stream, virtual_keyboard_mouse.clone())
-    });
+    let filtered_keyboard_device = keyboard_event_stream
+        .map(|event_stream| FilteredDevice::new(event_stream, virtual_keyboard_mouse.clone()));
+    let filtered_mouse_device = mouse_event_stream
+        .map(|event_stream| FilteredDevice::new(event_stream, virtual_keyboard_mouse.clone()));
     let mut state_machine = StateMachine::new(config, virtual_keyboard_mouse.clone());
 
     let mut filtered_keyboard_device = NullableDevice::new(filtered_keyboard_device);
