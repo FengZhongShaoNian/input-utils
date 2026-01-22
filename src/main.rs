@@ -826,6 +826,7 @@ async fn main() {
         let timeout_future = state_machine.state.timeout();
         let next_keyboard_event_future = filtered_keyboard_device.next_event();
         let next_mouse_event_future = filtered_mouse_device.next_event();
+        let shutdown_signal = tokio::signal::ctrl_c();
 
         select! {
             _ = timeout_future => {
@@ -836,6 +837,9 @@ async fn main() {
             }
             mouse_event = next_mouse_event_future => {
                 state_machine.accept(mouse_event.expect("Failed to accept mouse event"));
+            }
+            _ = shutdown_signal => {
+                break;
             }
         }
     }
