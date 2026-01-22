@@ -729,7 +729,10 @@ fn open_device_for_event_stream(device_path: &str) -> Option<EventStream> {
     if let Some(mut device) = device {
         match device.grab() {
             Ok(_) => match device.into_event_stream() {
-                Ok(event_stream) => Some(event_stream),
+                Ok(event_stream) => {
+                    println!("[INFO] Opened event stream successfully, device path: {}", device_path);
+                    Some(event_stream)
+                },
                 Err(e) => {
                     println!(
                         "[WARN] Failed to open event stream for device [{}]: {}",
@@ -788,7 +791,7 @@ async fn main() {
     if keyboard_device.is_none() && mouse_device.is_none() {
         panic!("Both keyboard devices and mouse devices are not found");
     }
-    let mut keyboard_event_stream = if let Some(device) = keyboard_device {
+    let keyboard_event_stream = if let Some(device) = keyboard_device {
         open_device_for_event_stream(&device)
     } else {
         None
@@ -806,10 +809,10 @@ async fn main() {
     let virtual_keyboard_mouse = Arc::new(VirtualKeyboardMouse::new(
         VirtualDevice::default().expect("Failed to initialize virtual device"),
     ));
-    let mut filtered_keyboard_device = keyboard_event_stream.map(|event_stream| {
+    let filtered_keyboard_device = keyboard_event_stream.map(|event_stream| {
         FilteredDevice::new(event_stream, virtual_keyboard_mouse.clone())
     });
-    let mut filtered_mouse_device = mouse_event_stream.map(|event_stream| {
+    let filtered_mouse_device = mouse_event_stream.map(|event_stream| {
         FilteredDevice::new(event_stream, virtual_keyboard_mouse.clone())
     });
     let mut state_machine = StateMachine::new(config, virtual_keyboard_mouse.clone());
@@ -844,11 +847,8 @@ async fn read_config() -> Config {
     let config_toml = tokio::fs::read_to_string(&config_file)
         .await
         .expect("Failed to read config.json");
-    println!("config.toml:\n{}", config_toml);
 
     let config: Config = toml::from_str(&config_toml).unwrap();
-
-    println!("config: {:?}", config);
 
     config
 }
