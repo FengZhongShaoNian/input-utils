@@ -6,7 +6,7 @@ use mouse_keyboard_input::VirtualDevice;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::future::pending;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::{fs, future, io};
@@ -757,14 +757,52 @@ fn open_device_for_event_stream(device_path: &str) -> Option<EventStream> {
 }
 
 fn get_available_device(devices: &Vec<String>) -> Option<String> {
-    for device in devices {
-        let path = Path::new(&device);
-        if fs::exists(path).expect(&format!("Failed to check device existence: {device}")) {
-            println!("Found device [{}]", device);
-            return Some(device.to_string());
+    for device_name in devices {
+        let device_path = find_device_path(device_name);
+        if let Some(device_path) = device_path {
+            return Some(device_path);
         }
     }
     None
+}
+
+fn list_all_input_devices() -> Vec<String> {
+    let mut devices: Vec<String> = Vec::new();
+    match fs::read_dir(Path::new("/dev/input")) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(entry) => {
+                        let path = entry.path();
+                        if !path.is_dir() {
+                            let file_name = path.file_name().unwrap().to_str().unwrap();
+                            if file_name.starts_with("event") {
+                                devices.push(path.to_str().unwrap().to_string());
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("读取/dev/input中的条目时出错：{}", e),
+                }
+            }
+        }
+        Err(e) => eprintln!("读取/dev/input目录时出错：{}", e),
+    }
+    devices
+}
+
+fn get_device_name(device_path: &Path) -> Option<String> {
+    let name = device_path.file_name().unwrap().to_str().unwrap();
+    let path = PathBuf::from("/sys/class/input/").join(name).join("device/name");
+    fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+}
+
+fn find_device_path(device_name: &str) -> Option<String> {
+    let files = list_all_input_devices();
+    files.iter().find(|f| {
+        if let Some(name ) = get_device_name(f.as_ref()) {
+            name == device_name
+        }else { false }
+    }).cloned()
 }
 
 struct NullableDevice {
