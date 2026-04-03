@@ -37,4 +37,4 @@ The configuration file uses the `TOML` format and is named `config.toml`, locate
 Issues and Pull Requests are welcome! Please follow the project's code style and provide clear commit messages.
 
 ## License
-This project is licensed under the MIT License. See the LICENSE file in the repository for details.
+This project is licensed under the GPL License. See the LICENSE file in the repository for details.
